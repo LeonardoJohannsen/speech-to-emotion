@@ -9,32 +9,37 @@ device_amd = torch_directml.device()
 print(f"Utilizando AMD para Emoção: {device_amd}")
 
 # ==========================================
-# 1. CARREGANDO OS MODELOS (Apenas uma vez)
+# 1. CARREGANDO OS 3 MODELOS
 # ==========================================
 print("Carregando modelos (Isso leva alguns segundos)...")
-classifier = pipeline("audio-classification", model="Dpngtm/wav2vec2-emotion-recognition", device=device_amd)
-transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-small") # CPU
+
+# 1.1 Modelo de Emoção da Voz (Roda na GPU AMD)
+classifier_audio = pipeline("audio-classification", model="Dpngtm/wav2vec2-emotion-recognition", device=device_amd)
+
+# 1.2 Modelo de Transcrição Whisper (Sozinho na CPU, agora na versão mais inteligente)
+transcriber = pipeline("automatic-speech-recognition", model="openai/whisper-medium")
+
+# 1.3 Modelo de Análise Psicológica do Texto (Roda na CPU para evitar erro do DirectML)
+classificador_texto = pipeline("zero-shot-classification", model="MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
 
 # ==========================================
-# 2. CONFIGURAÇÕES DO DATASET
+# 2. CONFIGURAÇÕES DA ANÁLISE
 # ==========================================
-# ⚠️ IMPORTANTE: Coloque o caminho exato da pasta onde estão os áudios
-pasta_dataset = "C:/Users/leona/OneDrive/Documentos/faculdade/AudioToText/archive/audio_speech_actors_01-24/Actor_24"
+# Categorias que a IA vai procurar no texto (você pode editar como quiser)
+categorias_psicologicas = [
+    "Feedback Positivo e Bom Humor",
+    "Exaustão Física ou Sobrecarga",
+    "Atrito Interpessoal ou Briga",
+    "Desmotivação, frustração ou falta de perspectiva", # <-- Resolve os áudios 'desmotivado'
+    "Intenção de pedir demissão ou sair do emprego",     # <-- Resolve os áudios 'largando'
+    "Denúncia de infração, assédio ou perigo físico"     # <-- Ajuda a IA a entender a 'situacao'
+]
 
-# Dicionário do RAVDESS: O 3º número do arquivo indica a emoção real
-mapa_emocoes = {
-    "01": "neutral", "02": "calm", "03": "happy", "04": "sad",
-    "05": "angry", "06": "fearful", "07": "disgust", "08": "surprised"
-}
-
-# Lista todos os arquivos .wav da pasta (pegando só os 5 primeiros para um teste rápido)
-# Se quiser testar todos, apague o [:5] no final da linha abaixo
+# Configure a pasta com seus áudios de teste (Lembrete: áudios do RAVDESS sempre darão "Rotina normal")
+pasta_dataset = "C:/Users/leona/OneDrive/Documentos/faculdade/AudioToText/pasta_teste"
 arquivos = [f for f in os.listdir(pasta_dataset) if f.endswith(".wav")]
 
-total_arquivos = len(arquivos)
-acertos = 0
-
-print(f"\nIniciando o teste com {total_arquivos} arquivos...\n")
+print(f"\nIniciando análise profunda de {len(arquivos)} arquivos...\n")
 print("="*60)
 
 # ==========================================
@@ -43,46 +48,50 @@ print("="*60)
 for arquivo in arquivos:
     caminho_completo = os.path.join(pasta_dataset, arquivo)
     
-    # --- DESCOBRINDO A EMOÇÃO REAL (GABARITO) ---
-    # Divide o nome '03-01-04-01-01-01-01.wav' pelos traços
-    partes_nome = arquivo.split("-")
-    
-    # Pega o 3º número (índice 2)
-    codigo_emocao = partes_nome[2] 
-    emocao_real = mapa_emocoes.get(codigo_emocao, "desconhecida")
-    
     # --- LENDO O ÁUDIO ---
     audio_array, sample_rate = sf.read(caminho_completo, dtype='float32')
     if len(audio_array.shape) > 1:
         audio_array = np.mean(audio_array, axis=1)
 
-    # --- IA DE EMOÇÃO ---
-    predictions = classifier({"array": audio_array, "sampling_rate": sample_rate})
-    emocao_ia = predictions[0]['label'].lower() # Pega a de maior porcentagem em minúsculo
+    # --- IA 1: EMOÇÃO DA VOZ ---
+    predictions_audio = classifier_audio({"array": audio_array, "sampling_rate": sample_rate})
+    emocao_voz = predictions_audio[0]['label'].upper() 
     
-    # --- IA DE TEXTO (WHISPER) ---
-    # Coloquei "en" porque o RAVDESS é em inglês. Se testar áudios BR depois, mude para "pt"
-    texto = transcriber({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "en"})['text'].strip()
+    # --- IA 2: TRANSCRIÇÃO (WHISPER) ---
+    texto_extraido = transcriber({"raw": audio_array, "sampling_rate": sample_rate}, generate_kwargs={"task": "transcribe", "language": "pt"})['text'].strip()
 
-    # --- COMPARANDO RESULTADOS ---
-    acertou = emocao_ia == emocao_real
-    if acertou:
-        acertos += 1
-        status = "✅ ACERTOU"
+    # --- IA 3: ANÁLISE ZERO-SHOT DO TEXTO ---
+    # Só analisa se o Whisper conseguiu entender alguma palavra
+    if texto_extraido:
+        analise_texto = classificador_texto(
+            texto_extraido, 
+            categorias_psicologicas, 
+            hypothesis_template="O relato deste funcionário sobre o trabalho indica um cenário de {}.", # <-- ISSO MUDA TUDO
+            multi_label=False
+        )
+        # Pega a categoria com maior pontuação
+        categoria_texto = analise_texto['labels'][0]
+        confianca_texto = analise_texto['scores'][0] * 100
     else:
-        status = "❌ ERROU"
+        categoria_texto = "Inconclusivo (Áudio mudo)"
+        confianca_texto = 0.0
 
-    # --- IMPRIMINDO NA TELA ---
+    palavras_criticas = ["choque", "vazando", "assédio", "machista", "roubo", "dinheiro do caixa", "denunciar"]
+
+    # Depois que o Whisper gerar o 'texto_extraido':
+    texto_min = texto_extraido.lower()
+    alerta_seguranca = False
+
+    for palavra in palavras_criticas:
+        if palavra in texto_min:
+            alerta_seguranca = True
+            break
+
+    if alerta_seguranca:
+        print("🚨 ALERTA RH: POSSÍVEL CRIME OU RISCO DE VIDA DETECTADO!")
+    # --- IMPRIMINDO O CRUZAMENTO DE DADOS ---
     print(f"Arquivo: {arquivo}")
-    print(f"Fala: \"{texto}\"")
-    print(f"Emoção Real: {emocao_real.upper()} | Emoção da IA: {emocao_ia.upper()} -> {status}")
+    print(f"Fala: \"{texto_extraido}\"")
+    print(f"🎤 Tom de Voz : {emocao_voz}")
+    print(f"🧠 Tema Falado: {categoria_texto.upper()} ({confianca_texto:.1f}%)")
     print("-" * 60)
-
-# ==========================================
-# 4. RESULTADO FINAL
-# ==========================================
-if total_arquivos > 0:
-    acuracia = (acertos / total_arquivos) * 100
-    print(f"\n🎯 ACURÁCIA FINAL: {acuracia:.2f}% ({acertos} acertos de {total_arquivos} áudios)\n")
-else:
-    print("\nNenhum arquivo .wav foi encontrado na pasta informada!")
